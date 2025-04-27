@@ -1483,6 +1483,28 @@ async def show_manage_notifications_menu(update_or_query, context: ContextTypes.
             reply_markup=reply_markup
         )
 
+def get_public_settings() -> dict | None:
+    """
+    Fetches the public settings from the Overseerr API.
+
+    Returns:
+        dict | None: A dictionary containing the public settings if the request is
+        successful, or None if an error occurs.
+    """
+    try:
+        url = f"{OVERSEERR_API_URL}/settings/public"
+        headers = {
+            "X-Api-Key": OVERSEERR_API_KEY
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        settings = response.json()
+        logger.info(f"Current public settings: {settings}")
+        return settings
+    except requests.RequestException as e:
+        logger.error(f"Error when retrieving public settings: {e}")
+        return None
+    
 def get_user_notification_settings(overseerr_telegram_user_id: int) -> dict:
     """
     (Optional) Fetch the user's notification settings from Overseerr:
@@ -1804,6 +1826,9 @@ async def process_user_selection(
     else:
         query = update_or_query
 
+    # Public server settings
+    public_settings = get_public_settings()
+    
     # Basic media info
     media_title = result.get("title", "Unknown Title")
     media_year = result.get("year", "????")
@@ -1848,18 +1873,24 @@ async def process_user_selection(
 
     # Build request_buttons list
     request_buttons = []
-    if can_request_resolution(status_hd):
-        btn_1080p = InlineKeyboardButton("📥 1080p", callback_data=f"confirm_1080p_{result['id']}")
-        request_buttons.append(btn_1080p)
+    if (result.get("mediaType", "")=='movie' and public_settings['movie4kEnabled']) or (result.get("mediaType", "")=='tv' and public_settings['series4kEnabled']):
+        # If a 4K server is configured, show 1080p and 4K buttons based on status and user permissions
+        if can_request_resolution(status_hd):
+            btn_1080p = InlineKeyboardButton("📥 1080p", callback_data=f"confirm_1080p_{result['id']}")
+            request_buttons.append(btn_1080p)
 
-    if user_has_4k_permission and can_request_resolution(status_4k):
-        btn_4k = InlineKeyboardButton("📥 4K", callback_data=f"confirm_4k_{result['id']}")
-        request_buttons.append(btn_4k)
+        if user_has_4k_permission and can_request_resolution(status_4k):
+            btn_4k = InlineKeyboardButton("📥 4K", callback_data=f"confirm_4k_{result['id']}")
+            request_buttons.append(btn_4k)
 
-    if user_has_4k_permission and can_request_resolution(status_hd) and can_request_resolution(status_4k):
-        btn_both = InlineKeyboardButton("📥 Both", callback_data=f"confirm_both_{result['id']}")
-        request_buttons.append(btn_both)
-
+        if user_has_4k_permission and can_request_resolution(status_hd) and can_request_resolution(status_4k):
+            btn_both = InlineKeyboardButton("📥 Both", callback_data=f"confirm_both_{result['id']}")
+            request_buttons.append(btn_both)
+    else:
+        # If no 4K server is configured, only show a "Request" button
+        if can_request_resolution(status_hd):
+            btn_1080p = InlineKeyboardButton("📥 Request", callback_data=f"confirm_1080p_{result['id']}")
+            request_buttons.append(btn_1080p)
     # Adjust labels if exactly two buttons are present
     if len(request_buttons) == 1:
         new_buttons = []
@@ -1890,10 +1921,14 @@ async def process_user_selection(
     status_4k_str = interpret_status(status_4k)
 
     status_lines = []
-    if status_hd_str:
-        status_lines.append(f"• 1080p: {status_hd_str}")
-    if status_4k_str:
-        status_lines.append(f"• 4K: {status_4k_str}")
+    if (result.get("mediaType", "")=='movie' and public_settings['movie4kEnabled']) or (result.get("mediaType", "")=='tv' and public_settings['series4kEnabled']):
+        if status_hd_str:
+            status_lines.append(f"• 1080p: {status_hd_str}")
+        if status_4k_str:
+            status_lines.append(f"• 4K: {status_4k_str}")
+    else:
+        if status_hd_str:
+            status_lines.append(f"• {status_hd_str}")
 
     if status_lines:
         status_block = "*Current status*:\n" + "\n".join(status_lines)
@@ -1952,6 +1987,11 @@ def user_can_request_4k(overseerr_telegram_user_id: int, media_type: str) -> boo
     """
     Returns True if this user can request 4K for the specified media_type.
     """
+    # user can't request 4K if the Overseerr server doesn't support it
+    public_settings = get_public_settings()  
+    if (media_type=='movie' and not public_settings['movie4kEnabled']) or (media_type=='tv' and not public_settings['series4kEnabled']):
+        return False
+    
     all_users = get_overseerr_users()
     user_info = next((u for u in all_users if u["id"] == overseerr_telegram_user_id), None)
     if not user_info:
